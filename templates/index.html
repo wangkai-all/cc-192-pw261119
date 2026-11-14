@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>分区裁剪查询对照台</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --line: #e3e6ea; --text: #1f2933;
+    --muted: #6b7280; --keep: #047857; --keep-bg: #ecfdf5;
+    --exclude: #b45309; --exclude-bg: #fffbeb;
+    --bad: #b91c1c; --bad-bg: #fef2f2; --info: #1d4ed8; --info-bg: #eff6ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         background: var(--bg); color: var(--text); font-size: 14px; }
+  header { padding: 18px 28px; background: var(--card); border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0 0 4px; font-size: 20px; }
+  header p { margin: 0; color: var(--muted); }
+  main { padding: 22px 28px; max-width: 1280px; margin: 0 auto; display: grid; gap: 18px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 16px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .muted { color: var(--muted); }
+  button { border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 8px 14px;
+           cursor: pointer; font-size: 13px; }
+  button.primary { background: var(--info); color: #fff; border-color: var(--info); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.keep { background: var(--keep-bg); color: var(--keep); }
+  .pill.exclude { background: var(--exclude-bg); color: var(--exclude); }
+  .pill.stale { background: var(--bad-bg); color: var(--bad); }
+  .pill.indexed { background: var(--info-bg); color: var(--info); }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .stat .num { font-size: 20px; font-weight: 700; margin-top: 2px; }
+  .stat .label { color: var(--muted); font-size: 12px; }
+  .group-box { border: 1px dashed var(--line); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: #fafbfc; }
+  .group-box h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+  .cond-row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  select, input { padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; background: #fafbfc; position: sticky; top: 0; }
+  .reason { font-size: 12px; color: #374151; }
+  .reason ul { margin: 4px 0 0; padding-left: 18px; }
+  .banner { padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; font-weight: 600; }
+  .banner.ok { background: var(--keep-bg); color: var(--keep); }
+  .banner.fail { background: var(--bad-bg); color: var(--bad); }
+  .table-wrap { max-height: 560px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+  .tag-est { background: #f5f5f4; color: #78716c; padding: 1px 6px; border-radius: 5px; font-size: 11px; }
+  .tag-meas { background: var(--info-bg); color: var(--info); padding: 1px 6px; border-radius: 5px; font-size: 11px; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; padding: 0; width: 720px; max-width: 92vw; }
+  dialog .dlg-head { display: flex; justify-content: space-between; align-items: center;
+                  padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  dialog .dlg-body { padding: 16px 18px; max-height: 70vh; overflow: auto; }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .err { color: var(--bad); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>分区裁剪查询对照台</h1>
+  <p>每个 Parquet 文件维护数值范围、空值数量与字符串前缀摘要；只提供项目支持的筛选组合，无法判断时保守保留。每次查询同时跑「裁剪查询」和「关闭裁剪的全量基线」并逐行核对。</p>
+</header>
+<main>
+  <section class="card">
+    <h2>① 索引状态与维护</h2>
+    <div class="row" style="margin-bottom:12px">
+      <button id="btn-refresh">刷新状态</button>
+      <button id="btn-build" class="primary">增量建索引 / 续建</button>
+      <button id="btn-rebuild">重建索引</button>
+      <span id="build-msg" class="muted"></span>
+    </div>
+    <div class="stat-grid" id="index-stats"><div class="muted">加载中…</div></div>
+  </section>
+
+  <section class="card">
+    <h2>② 构造筛选条件（组内 AND，组间 OR；仅项目支持的列类型/操作符组合）</h2>
+    <div id="groups"></div>
+    <div class="row">
+      <button id="btn-add-group">+ 添加 OR 条件组</button>
+      <button id="btn-query" class="primary">执行查询并与全量基线核对</button>
+      <span id="query-msg" class="muted"></span>
+    </div>
+  </section>
+
+  <section class="card" id="result-card" style="display:none">
+    <h2>③ 查询结果与逐文件读取对照</h2>
+    <div id="banner"></div>
+    <div class="stat-grid" id="result-stats" style="margin-bottom:14px"></div>
+    <p class="muted" style="margin:0 0 10px">
+      <span class="tag-est">估算</span> 来自索引/文件大小的推算，并非测量；
+      <span class="tag-meas">实测</span> 是扫描时由字节计数包装器统计的真实读取量。
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>文件</th><th>裁剪决定与理由</th><th>索引状态</th>
+          <th>文件大小</th><th>裁剪查询（估算/实测字节）</th>
+          <th>基线实测字节</th><th>命中行 / 文件行</th><th></th>
+        </tr></thead>
+        <tbody id="file-rows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <div class="dlg-head"><strong id="dlg-title">文件统计</strong><button id="dlg-close">关闭</button></div>
+  <div class="dlg-body" id="dlg-body"></div>
+</dialog>
+
+<script>
+const NO_VALUE_OPS = new Set(["is_null", "is_not_null"]);
+const LIST_OPS = new Set(["in"]);
+let STATUS = null;
+let groupId = 0;
+
+async function api(path, options) {
+  const resp = await fetch(path, options);
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || resp.statusText);
+  return data;
+}
+function fmtBytes(n) {
+  if (n == null) return "—";
+  if (n < 1024) return n + " B";
+  return (n / 1024).toFixed(1) + " KB";
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+async function loadStatus() {
+  STATUS = await api("/api/status");
+  const c = STATUS.counts;
+  document.getElementById("index-stats").innerHTML = `
+    <div class="stat"><div class="label">数据目录</div><div class="num mono" style="font-size:13px">${esc(STATUS.data_dir)}</div></div>
+    <div class="stat"><div class="label">Parquet 文件</div><div class="num">${STATUS.parquet_files}</div></div>
+    <div class="stat"><div class="label">已索引</div><div class="num">${c.indexed || 0}</div></div>
+    <div class="stat"><div class="label">过期/指纹不符</div><div class="num">${c.stale || 0}</div></div>
+    <div class="stat"><div class="label">未索引</div><div class="num">${c.unindexed || 0}</div></div>
+    <div class="stat"><div class="label">journal（可续建）</div><div class="num">${STATUS.journal_exists ? "存在" : "无"}</div></div>`;
+  if (!document.querySelector(".group-box")) addGroup();
+  refreshColumnOptions();
+}
+
+function refreshColumnOptions() {
+  document.querySelectorAll("select.col").forEach(sel => {
+    const current = sel.value;
+    sel.innerHTML = Object.entries(STATUS.column_kinds)
+      .map(([name, kind]) => `<option value="${esc(name)}" data-kind="${esc(kind)}">${esc(name)} (${esc(kind)})</option>`).join("");
+    if (current) sel.value = current;
+    sel.dispatchEvent(new Event("change"));
+  });
+}
+
+function addGroup() {
+  const id = ++groupId;
+  const wrap = document.createElement("div");
+  wrap.className = "group-box";
+  wrap.dataset.gid = id;
+  wrap.innerHTML = `<h3>OR 条件组 #${id}（组内条件为 AND）</h3>
+    <div class="conds"></div>
+    <div class="row"><button type="button" class="btn-add-cond">+ 添加 AND 条件</button>
+    <button type="button" class="btn-del-group">删除该组</button></div>`;
+  document.getElementById("groups").appendChild(wrap);
+  wrap.querySelector(".btn-add-cond").onclick = () => addCondition(wrap);
+  wrap.querySelector(".btn-del-group").onclick = () => { wrap.remove(); };
+  addCondition(wrap);
+}
+
+function addCondition(groupBox) {
+  const row = document.createElement("div");
+  row.className = "cond-row";
+  row.innerHTML = `
+    <select class="col"></select>
+    <select class="op"></select>
+    <input class="val" placeholder="比较值；in 用逗号分隔" style="min-width:220px">
+    <button type="button" class="btn-del-cond">×</button>`;
+  groupBox.querySelector(".conds").appendChild(row);
+  refreshColumnOptions();
+  const colSel = row.querySelector(".col");
+  const opSel = row.querySelector(".op");
+  const valInput = row.querySelector(".val");
+  colSel.onchange = () => fillOps(row);
+  opSel.onchange = () => {
+    const op = opSel.value;
+    valInput.style.display = NO_VALUE_OPS.has(op) ? "none" : "";
+    valInput.placeholder = LIST_OPS.has(op) ? "逗号分隔的值列表" : "比较值";
+  };
+  row.querySelector(".btn-del-cond").onclick = () => row.remove();
+  fillOps(row);
+}
+
+function fillOps(row) {
+  const colSel = row.querySelector(".col");
+  const option = colSel.selectedOptions[0];
+  const kind = option ? option.dataset.kind : null;
+  const ops = (STATUS.supported_ops[kind] || []);
+  const opSel = row.querySelector(".op");
+  const current = opSel.value;
+  opSel.innerHTML = ops.map(op =>
+    `<option value="${esc(op)}">${esc(STATUS.operator_labels[op] || op)}</option>`).join("");
+  if (ops.includes(current)) opSel.value = current;
+  opSel.dispatchEvent(new Event("change"));
+}
+
+function collectFilters() {
+  const groups = [];
+  document.querySelectorAll(".group-box").forEach(box => {
+    const conds = [];
+    box.querySelectorAll(".cond-row").forEach(row => {
+      const column = row.querySelector(".col").value;
+      const op = row.querySelector(".op").value;
+      const raw = row.querySelector(".val").value.trim();
+      const cond = { column, op };
+      if (!NO_VALUE_OPS.has(op)) {
+        if (LIST_OPS.has(op)) cond.value = raw.split(",").map(s => s.trim()).filter(Boolean);
+        else cond.value = raw;
+      }
+      conds.push(cond);
+    });
+    if (conds.length) groups.push(conds);
+  });
+  return groups;
+}
+
+async function runQuery() {
+  const msg = document.getElementById("query-msg");
+  msg.textContent = "查询中（含全量基线核对）…";
+  try {
+    const data = await api("/api/query", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filters: collectFilters() })
+    });
+    msg.textContent = "";
+    renderResult(data);
+  } catch (err) {
+    msg.innerHTML = `<span class="err">${esc(err.message)}</span>`;
+  }
+}
+
+function renderResult(data) {
+  document.getElementById("result-card").style.display = "";
+  const banner = document.getElementById("banner");
+  banner.className = "banner " + (data.equivalent ? "ok" : "fail");
+  banner.textContent = data.equivalent
+    ? `✔ 核对通过：裁剪查询与全量基线均返回 ${data.matched_rows} 行——${esc(data.equivalence_detail)}`
+    : `✗ 核对失败：${esc(data.equivalence_detail)}（裁剪可能漏结果，请检查！）`;
+  const saved = data.baseline_measured_read_bytes
+    ? (100 * (1 - data.measured_read_bytes / data.baseline_measured_read_bytes)).toFixed(1)
+    : "0.0";
+  document.getElementById("result-stats").innerHTML = `
+    <div class="stat"><div class="label">保留 / 排除文件</div><div class="num">${data.kept_count} / ${data.excluded_count}</div></div>
+    <div class="stat"><div class="label">命中行数</div><div class="num">${data.matched_rows}</div></div>
+    <div class="stat"><div class="label"><span class="tag-est">估算</span>读取字节（裁剪）</div><div class="num">${fmtBytes(data.estimated_read_bytes)}</div></div>
+    <div class="stat"><div class="label"><span class="tag-meas">实测</span>读取字节（裁剪）</div><div class="num">${fmtBytes(data.measured_read_bytes)}</div></div>
+    <div class="stat"><div class="label"><span class="tag-meas">实测</span>读取字节（全量基线）</div><div class="num">${fmtBytes(data.baseline_measured_read_bytes)}</div></div>
+    <div class="stat"><div class="label">实测节省</div><div class="num">${saved}%</div></div>
+    <div class="stat"><div class="label">回退实际扫描文件</div><div class="num">${data.fallback_files.length}</div></div>
+    <div class="stat"><div class="label">耗时</div><div class="num">${data.elapsed_ms} ms</div></div>`;
+
+  const tbody = document.getElementById("file-rows");
+  tbody.innerHTML = data.files.map(f => {
+    const p = f.plan, s = f.scan, b = f.baseline_scan;
+    const reasons = p.group_reasons.length
+      ? `<ul>${p.group_reasons.map(g =>
+          `<li>[${g.action === "exclude" ? "排除组" : "保留组"}] ${esc(g.reason)}
+           <ul>${g.conditions.map(cv => `<li>${esc(cv.column)} ${esc(cv.op)}：${esc(cv.reason)}</li>`).join("")}</ul></li>`).join("")}</ul>`
+      : "";
+    const stalePill = p.index_state !== "indexed"
+      ? `<span class="pill stale">${esc(p.index_state)}</span>` : `<span class="pill indexed">indexed</span>`;
+    return `<tr>
+      <td class="mono">${esc(p.path)}</td>
+      <td><span class="pill ${p.action}">${p.action === "keep" ? "保留" : "排除"}</span>
+          <div class="reason">${esc(p.reason)}${reasons}</div></td>
+      <td>${stalePill}</td>
+      <td>${fmtBytes(s.file_size_bytes)}</td>
+      <td><span class="tag-est">估算</span> ${fmtBytes(s.estimated_bytes)}<br>
+          <span class="tag-meas">实测</span> ${fmtBytes(s.measured_bytes)}（${s.read_calls} 次 read）</td>
+      <td><span class="tag-meas">实测</span> ${fmtBytes(b.measured_bytes)}</td>
+      <td>${s.rows_matched} / ${s.rows_in_file}${s.error ? `<div class="err">${esc(s.error)}</div>` : ""}</td>
+      <td><button class="btn-detail" data-path="${esc(p.path)}">统计详情</button></td>
+    </tr>`;
+  }).join("");
+  document.querySelectorAll(".btn-detail").forEach(btn =>
+    btn.onclick = () => showDetail(btn.dataset.path));
+}
+
+async function showDetail(relPath) {
+  const d = await api("/api/files/" + encodeURIComponent(relPath));
+  document.getElementById("dlg-title").textContent = relPath;
+  if (!d.stat) {
+    document.getElementById("dlg-body").innerHTML = `<p class="err">该文件无索引统计（状态：${esc(d.state)}），查询时回退实际扫描。</p>`;
+  } else {
+    const cols = Object.values(d.stat.columns).map(c => `
+      <div class="stat" style="margin-bottom:8px">
+        <div class="label">${esc(c.column)} <span class="mono">(${esc(c.kind || "unsupported")})</span></div>
+        <div>行数 ${c.row_count}，空值 ${c.null_count === null ? "不可用" : c.null_count}，全空 ${c.all_null ? "是" : "否"}</div>
+        <div>min: <span class="mono">${esc(c.min_available ? JSON.stringify(c.min) : "N/A")}</span>
+             max: <span class="mono">${esc(c.max_available ? JSON.stringify(c.max) : "N/A")}</span></div>
+        ${Object.keys(c.prefixes || {}).map(len => `
+          <div>前缀(${len}，完整摘要=${c.prefix_complete[len] ? "是" : "否"}):
+            <span class="mono">${esc(c.prefixes[len].map(p => p[0] + "×" + p[1]).join(", "))}</span></div>`).join("")}
+      </div>`).join("");
+    document.getElementById("dlg-body").innerHTML =
+      `<p>状态：<span class="pill ${d.state === "indexed" ? "indexed" : "stale"}">${esc(d.state)}</span>
+        SHA-256：<span class="mono">${esc(d.fingerprint.sha256.slice(0, 16))}…</span></p><div>${cols}</div>`;
+  }
+  document.getElementById("dlg").showModal();
+}
+
+document.getElementById("btn-add-group").onclick = addGroup;
+document.getElementById("btn-query").onclick = runQuery;
+document.getElementById("btn-refresh").onclick = loadStatus;
+document.getElementById("dlg-close").onclick = () => document.getElementById("dlg").close();
+document.getElementById("btn-build").onclick = async () => {
+  const m = document.getElementById("build-msg"); m.textContent = "建索引中…";
+  try {
+    const r = await api("/api/index/build", { method: "POST" });
+    m.textContent = `完成：处理 ${r.processed}/${r.total}，续建跳过 ${r.skipped}${r.interrupted ? "（曾中断）" : ""}`;
+    loadStatus();
+  } catch (e) { m.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+};
+document.getElementById("btn-rebuild").onclick = async () => {
+  if (!confirm("重建将丢弃现有索引与 journal，确认？")) return;
+  const m = document.getElementById("build-msg"); m.textContent = "重建中…";
+  try {
+    const r = await api("/api/index/build?rebuild=1", { method: "POST" });
+    m.textContent = `重建完成：${r.processed}/${r.total} 个文件`;
+    loadStatus();
+  } catch (e) { m.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+};
+loadStatus();
+</script>
+</body>
+</html>

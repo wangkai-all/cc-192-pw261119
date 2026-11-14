@@ -32,3 +32,8 @@ test-results/
 *.sqlite3-shm
 *.sqlite3-journal
 !*.traineddata.gz
+
+# 演示数据与索引（由 scripts/generate_demo_data.py 生成，可随时重建）
+data/
+.pytest_cache/
+.partition_index/

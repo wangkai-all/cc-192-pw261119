@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "partition-query"
+version = "0.1.0"
+description = "带列统计索引、保守裁剪判定与读取量对照的 Parquet 分区查询项目"
+requires-python = ">=3.11"
+dependencies = [
+    "pyarrow>=26.0.0",
+    "flask>=3.1.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=9.0.0"]
+
+[tool.setuptools]
+packages = ["partition_query"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
